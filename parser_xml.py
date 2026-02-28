@@ -206,6 +206,12 @@ def extrair_dados_processo(elem_processo) -> dict | None:
         return None
     
     # Finalizando a string de detalhes com a marca
+    detalhes_formatados = []
+    for d in detalhes_processos_list:
+        marca_nome_str = dados.get("marca_nome") or "N/A"
+        detalhes_formatados.append(f"[{d['tipo']}] Proc: {numero} - Marca: {marca_nome_str} - Origem: {d['origem']}")
+    
+    dados["detalhes_processos"] = " || ".join(detalhes_formatados) if detalhes_formatados else None
     
     # --- Procurador ---
     proc_elem = elem_processo.find(".//procurador")
@@ -303,6 +309,8 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
     total_relevantes = 0
     total_leads = 0
     
+    leads_cache = {}  # Cache de 'titular_nome' -> objeto Lead
+    
     try:
         # iterparse: lê o XML como stream, processando tag por tag
         context = etree.iterparse(
@@ -369,26 +377,51 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
             )
             
             if eh_lead:
-                # Verificar se lead já existe
-                lead_existente = session.query(Lead).filter_by(
-                    numero_processo=dados["numero_processo"]
-                ).first()
+                titular = dados.get("titular_nome")
                 
-                if not lead_existente:
-                    score = calcular_score_inicial(dados)
-                    classificacao = classificar_lead(score)
+                if titular:
+                    lead_existente = leads_cache.get(titular)
                     
-                    novo_lead = Lead(
-                        numero_processo=dados["numero_processo"],
-                        score=score,
-                        classificacao=classificacao,
-                        tipo_pessoa=dados.get("tipo_pessoa"),
-                        quantidade_ataques=len(dados.get("codigos_ocorridos", [])),
-                        detalhes_processos=dados.get("detalhes_processos"),
-                        status="PENDENTE",
-                    )
-                    session.add(novo_lead)
-                    total_leads += 1
+                    if not lead_existente:
+                        # Verifica no banco apenas se não estiver no cache
+                        lead_existente = session.query(Lead).join(Processo).filter(
+                            Processo.titular_nome == titular
+                        ).first()
+                        if lead_existente:
+                            leads_cache[titular] = lead_existente
+                    
+                    if lead_existente:
+                        # Agrupar: atualizar o lead que já existe para o mesmo Titular
+                        qtd = len(dados.get("codigos_ocorridos", []))
+                        lead_existente.quantidade_ataques = (lead_existente.quantidade_ataques or 0) + qtd
+                        
+                        novo_det = dados.get("detalhes_processos")
+                        if novo_det:
+                            if lead_existente.detalhes_processos:
+                                lead_existente.detalhes_processos += f" || {novo_det}"
+                            else:
+                                lead_existente.detalhes_processos = novo_det
+                                
+                        # Soma um pequeno bônus ao score por ter sofrido ataque múltiplo (e limita em 100)
+                        lead_existente.score = min((lead_existente.score or 0) + 10, 100)
+                        lead_existente.classificacao = classificar_lead(lead_existente.score)
+                    else:
+                        # Criar novo lead
+                        score = calcular_score_inicial(dados)
+                        classificacao = classificar_lead(score)
+                        
+                        novo_lead = Lead(
+                            numero_processo=dados["numero_processo"],
+                            score=score,
+                            classificacao=classificacao,
+                            tipo_pessoa=dados.get("tipo_pessoa"),
+                            quantidade_ataques=len(dados.get("codigos_ocorridos", [])),
+                            detalhes_processos=dados.get("detalhes_processos"),
+                            status="PENDENTE",
+                        )
+                        session.add(novo_lead)
+                        leads_cache[titular] = novo_lead
+                        total_leads += 1
             
             # Commit a cada 500 registros (performance)
             if total_relevantes % 500 == 0:

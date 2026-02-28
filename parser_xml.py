@@ -186,7 +186,8 @@ def extrair_dados_processo(elem_processo) -> dict | None:
         return None
     
     # --- Titular ---
-    titular_elem = elem_processo.find(TAG_TITULAR)
+    # O INPI agrupa em <titulares><titular .../></titulares>, usar './/'
+    titular_elem = elem_processo.find(".//titular")
     if titular_elem is not None:
         nome_razao = titular_elem.get("nome-razao-social", "").strip() or None
         if nome_razao and is_concorrente(nome_razao):
@@ -207,7 +208,7 @@ def extrair_dados_processo(elem_processo) -> dict | None:
     # Finalizando a string de detalhes com a marca
     
     # --- Procurador ---
-    proc_elem = elem_processo.find(TAG_PROCURADOR)
+    proc_elem = elem_processo.find(".//procurador")
     if proc_elem is not None:
         nome_proc = proc_elem.get("nome-razao-social", "").strip()
         if nome_proc:

@@ -200,17 +200,8 @@ def extrair_dados_processo(elem_processo) -> dict | None:
         
     dados["codigos_ocorridos"] = codigos_ocorridos
     
-    # Descartar quem NÃO TEM UF (Geralmente indica estrangeiros, e não nos interessa)
+    # Descartar quem NÃO TEM UF (Estrangeiros)
     if not dados.get("titular_uf"):
-        return None
-    
-    # Filtrar APENAS por empresas ou tentar priorizar empresas (LTDA, ME, etc).
-    # O usuário pediu: "PRIORIZAR EMPRESAS;... LTA, ME E TITULARES QUE TEM ALGUM INDICADOR DE SER EMPRESA"
-    # Vamos rejeitar Pessoa Física que não aparenta ser empresa (se desejar, mas como foi dito 'priorizar' vamos remover quem é explicitamente PF sem indicador para limpar a base).
-    if dados["tipo_pessoa"] == "Pessoa Física":
-        # Se for física e não tiver indicação de que é empresa, a gente pode pular
-        # ou manter com score MUITO baixo. Como ele quer listão focado, vamos pular PFs normais
-        # que não caem na nossa regex de "Empresa"
         return None
     
     # Finalizando a string de detalhes com a marca

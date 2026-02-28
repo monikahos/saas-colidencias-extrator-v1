@@ -22,7 +22,7 @@ from pathlib import Path
 from lxml import etree
 import re
 
-from config import IPAS_CODES, IPAS_LEAD_CODES, IPAS_RENOVACAO_CODES, TEMP_DIR
+from config import TARGET_CODES, IPAS_RENOVACAO_CODES, TEMP_DIR
 from db import criar_tabelas, get_session, RPIHistory, Processo, Lead
 
 # ============================================================
@@ -113,113 +113,108 @@ def detectar_encoding(caminho_xml: Path) -> str:
 def extrair_dados_processo(elem_processo) -> dict | None:
     """
     Extrai os campos relevantes de um elemento <processo> do XML.
+    Lógica baseada no extrator_consolidado.py do usuário:
+    - Se tiver procurador: descartar
+    - Só importa: IPAS400, IPAS423, IPAS024
+    - Agrupar por titular_nome
     Retorna None se o processo deve ser descartado.
     """
     numero = elem_processo.get("numero", "").strip()
     if not numero:
         return None
     
+    # === REGRA 1: PROCURADOR (se tiver, descarta TUDO) ===
+    if elem_processo.find("procurador") is not None:
+        return None
+
     dados = {
         "numero_processo": numero,
         "marca_nome": None,
         "titular_nome": None,
         "titular_documento": None,
         "titular_pais": None,
+        "titular_uf": None,
         "tem_procurador": False,
         "procurador_nome": None,
         "classe_nice": None,
         "codigo_ipas": None,
         "data_deposito": None,
         "tipo_marca": None,
+        "tipo_pessoa": "Pessoa Física",
+        "codigos_ocorridos": [],
+        "detalhes_processos": None,
     }
     
-    # --- Despachos (IPAS) ---
     despachos_relevantes = []
-    codigos_ocorridos = []
     detalhes_processos_list = []
     
+    # === LOOP DESPACHOS (somente TARGET_CODES) ===
     for desp in elem_processo.iter(TAG_DESPACHO):
         codigo = desp.get("codigo", "").strip().upper()
-        if not codigo: continue
+        if not codigo:
+            continue
         
-        codigos_ocorridos.append(codigo)
+        # Só processa os 3 códigos relevantes
+        if codigo not in TARGET_CODES:
+            continue
         
-        if codigo in IPAS_CODES:
-            despachos_relevantes.append(codigo)
-            
-        if codigo in {'IPAS024', 'IPAS423', 'IPAS400'} or codigo in IPAS_LEAD_CODES:
-            tipo_procedimento = "Outro"
-            if codigo == "IPAS400": tipo_procedimento = "Nulidade"
-            elif codigo == "IPAS423": tipo_procedimento = "Oposição"
-            elif codigo == "IPAS024": tipo_procedimento = "Indeferimento"
-            else: tipo_procedimento = IPAS_CODES.get(codigo, "Despacho")
-            
-            texto_comp_elem = desp.find('texto-complementar')
-            texto_comp = texto_comp_elem.text if (texto_comp_elem is not None and texto_comp_elem.text) else ""
-            texto_comp = texto_comp.replace('\n', ' ').replace('\r', '').strip()
-            
-            quem_pediu = extrair_oponente(texto_comp) if codigo != "IPAS024" else "INPI (Governo)"
-            # A marca_nome será preenchida logo abaixo, atualizaremos a string se for necessário lá na frente
-            detalhes_processos_list.append({
-                "tipo": tipo_procedimento,
-                "origem": quem_pediu
-            })
+        # --- Titular (extrair aqui pois precisamos para filtros) ---
+        titular_elem = elem_processo.find(".//titular")
+        titular_nome = ""
+        titular_uf = ""
+        if titular_elem is not None:
+            titular_nome = titular_elem.get("nome-razao-social", "").strip()
+            titular_uf = titular_elem.get("uf", "").strip()
+        
+        # Descartar estrangeiros (sem UF)
+        if not titular_uf or titular_uf == "N/A":
+            break
+        
+        # Descartar concorrentes (escritórios de marca/advocacia)
+        if is_concorrente(titular_nome):
+            break
+        
+        # Tipo de procedimento
+        if codigo == "IPAS400":
+            tipo_procedimento = "Nulidade"
+        elif codigo == "IPAS423":
+            tipo_procedimento = "Oposição"
+        else:  # IPAS024
+            tipo_procedimento = "Indeferimento"
+        
+        # Extrair marca
+        marca_elem = elem_processo.find(".//marca/nome")
+        marca_nome = marca_elem.text.strip() if (marca_elem is not None and marca_elem.text) else "N/A"
+        
+        # Extrair texto complementar (para quem pediu a oposição)
+        texto_comp_elem = desp.find("texto-complementar")
+        texto_comp = ""
+        if texto_comp_elem is not None and texto_comp_elem.text:
+            texto_comp = texto_comp_elem.text.replace("\n", " ").replace("\r", "").strip()
+        
+        quem_pediu = extrair_oponente(texto_comp) if codigo != "IPAS024" else "INPI (Governo)"
+        
+        resumo = f"[{tipo_procedimento}] Proc: {numero} - Marca: {marca_nome} - Origem: {quem_pediu}"
+        detalhes_processos_list.append(resumo)
+        despachos_relevantes.append(codigo)
+        
+        # Preencher dados do titular (igual ao extrator_consolidado faz no defaultdict)
+        dados["titular_nome"] = titular_nome
+        dados["titular_uf"] = titular_uf
+        dados["titular_documento"] = titular_elem.get("cnpj-cpf", "").strip() or None if titular_elem is not None else None
+        dados["titulo_pais"] = titular_elem.get("pais", "").strip().upper() or None if titular_elem is not None else None
+        dados["tipo_pessoa"] = classificar_tipo_pessoa(titular_nome)
+        dados["marca_nome"] = marca_nome
+        
+        break  # Só pega o PRIMEIRO despacho relevante (igual ao extrator_consolidado)
     
+    # Se nenhum despacho relevante, descartar
     if not despachos_relevantes:
-        return None  # Nenhum despacho relevante, pular
+        return None
     
-    # Usar o despacho mais recente (último na lista)
     dados["codigo_ipas"] = despachos_relevantes[-1]
-    
-    # --- Marca ---
-    marca_elem = elem_processo.find(TAG_MARCA)
-    if marca_elem is not None:
-        nome_elem = marca_elem.find("nome")
-        if nome_elem is not None and nome_elem.text:
-            dados["marca_nome"] = nome_elem.text.strip()
-        
-        apresentacao = marca_elem.get("apresentacao", "").lower()
-        dados["tipo_marca"] = apresentacao  # "nominativa", "mista", "figurativa"
-    
-    # Descartar figurativas sem nome (Directive 02, passo 9)
-    if dados["tipo_marca"] == "figurativa" and not dados["marca_nome"]:
-        return None
-    
-    # --- Titular ---
-    # O INPI agrupa em <titulares><titular .../></titulares>, usar './/'
-    titular_elem = elem_processo.find(".//titular")
-    if titular_elem is not None:
-        nome_razao = titular_elem.get("nome-razao-social", "").strip() or None
-        if nome_razao and is_concorrente(nome_razao):
-            return None # Filtro de concorrente
-        
-        dados["titular_nome"] = nome_razao
-        dados["titular_documento"] = titular_elem.get("cnpj-cpf", "").strip() or None
-        dados["titular_pais"] = titular_elem.get("pais", "").strip().upper() or None
-        dados["titular_uf"] = titular_elem.get("uf", "").strip() or None
-        dados["tipo_pessoa"] = classificar_tipo_pessoa(nome_razao)
-        
-    dados["codigos_ocorridos"] = codigos_ocorridos
-    
-    # Descartar quem NÃO TEM UF (Estrangeiros)
-    if not dados.get("titular_uf"):
-        return None
-    
-    # Finalizando a string de detalhes com a marca
-    detalhes_formatados = []
-    for d in detalhes_processos_list:
-        marca_nome_str = dados.get("marca_nome") or "N/A"
-        detalhes_formatados.append(f"[{d['tipo']}] Proc: {numero} - Marca: {marca_nome_str} - Origem: {d['origem']}")
-    
-    dados["detalhes_processos"] = " || ".join(detalhes_formatados) if detalhes_formatados else None
-    
-    # --- Procurador ---
-    proc_elem = elem_processo.find(".//procurador")
-    if proc_elem is not None:
-        nome_proc = proc_elem.get("nome-razao-social", "").strip()
-        if nome_proc:
-            dados["tem_procurador"] = True
-            dados["procurador_nome"] = nome_proc
+    dados["codigos_ocorridos"] = despachos_relevantes
+    dados["detalhes_processos"] = " || ".join(detalhes_processos_list) if detalhes_processos_list else None
     
     # --- Classe NICE ---
     classe_elem = elem_processo.find(TAG_CLASSE_NICE)
@@ -234,7 +229,7 @@ def extrair_dados_processo(elem_processo) -> dict | None:
                 deposito_elem.text.strip(), "%d/%m/%Y"
             ).date()
         except ValueError:
-            pass  # Formato inesperado, ignorar
+            pass
     
     # Filtro de data mínima
     if dados["data_deposito"] and dados["data_deposito"].year < ANO_DEPOSITO_MINIMO:
@@ -249,42 +244,42 @@ def extrair_dados_processo(elem_processo) -> dict | None:
 
 def calcular_score_inicial(dados: dict) -> int:
     """
-    Calcula o score inicial do lead somando o peso de todos os despachos observados,
-    mais o bônus de Pessoa Jurídica e sem procurador.
+    Calcula o score inicial do lead.
+    Lógica idêntica ao extrator_consolidado.py:
+      - PJ: +30
+      - IPAS400 (Nulidade): +50
+      - IPAS423 (Oposição): +40
+      - IPAS024 (Indeferimento): +15
+    Pessoas físicas são incluídas mas com pontuação menor.
     """
     score = 0
     codigos = dados.get("codigos_ocorridos", [])
     tipo_pessoa = dados.get("tipo_pessoa", "Pessoa Física")
     
-    # Regra 1: Capacidade de pagamento
+    # Regra 1: Capacidade de pagamento (PJ > PF)
     if tipo_pessoa == "Pessoa Jurídica":
         score += 30
-        
-    # Regra 2: Bônus por não ter procurador (do pipeline original)
-    if not dados.get("tem_procurador", True):
-        score += 30
-        
-    # Regra 3: Peso dos despachos no alvo
-    for cod in codigos:
-        if cod == "IPAS400": score += 50    # Nulidade
-        elif cod == "IPAS423": score += 40  # Oposição
-        elif cod == "IPAS024": score += 15  # Indeferimento
-        elif cod == "IPAS029": score += 40  # Recurso
-        elif cod == "IPAS158": score += 45  # Concessão
-        elif cod == "IPAS025": score += 35  # Indeferimento final
-        elif cod == "IPAS009": score += 20  # Pedido novo
     
-    return min(score, 100) # Mantém o cap de 100 original
+    # Regra 2: Gravidade e volume dos despachos
+    for cod in codigos:
+        if cod == "IPAS400":
+            score += 50    # Nulidade (Altíssima)
+        elif cod == "IPAS423":
+            score += 40   # Oposição (Alta)
+        elif cod == "IPAS024":
+            score += 15   # Indeferimento (Regular)
+    
+    return min(score, 100)  # Cap em 100
 
 
 def classificar_lead(score: int) -> str:
-    """Classifica o lead pelo score em Tiers."""
+    """Classifica o lead em Tiers (idêntico ao extrator_consolidado.py)."""
     if score >= 70:
-        return "TIER A (Alta Prioridade)"
+        return "A (Alta Prioridade)"
     elif score >= 40:
-        return "TIER B (Prioridade Média)"
+        return "B (Prioridade Média)"
     else:
-        return "TIER C (Baixa Prioridade)"
+        return "C (Baixa Prioridade)"
 
 
 # ============================================================
@@ -302,7 +297,7 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
     encoding = detectar_encoding(caminho_xml)
     print(f"📄 Encoding detectado: {encoding}")
     print(f"📂 Arquivo: {caminho_xml}")
-    print(f"🔍 Filtrando IPAS: {list(IPAS_CODES.keys())}")
+    print(f"🔍 Filtrando IPAS: {TARGET_CODES}")
     print(f"{'='*60}")
     
     total_processos_xml = 0
@@ -367,14 +362,9 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
                 )
                 session.add(novo_processo)
             
-            # Criar Lead se elegível (sem procurador + IPAS de oportunidade)
-            ipas = dados["codigo_ipas"]
-            sem_procurador = not dados["tem_procurador"]
-            
-            eh_lead = (
-                (sem_procurador and ipas in IPAS_LEAD_CODES) or
-                (ipas in IPAS_RENOVACAO_CODES)
-            )
+            # Criar Lead: se chegou aqui, procurador já foi filtrado na extração
+            # Basta verificar se tem titular para criar o lead
+            eh_lead = (dados["codigo_ipas"] in TARGET_CODES)
             
             if eh_lead:
                 titular = dados.get("titular_nome")

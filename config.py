@@ -35,21 +35,13 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'leads.db'}")
 
 
 # ============================================================
-# CÓDIGOS IPAS RELEVANTES (filtro do parser XML)
+# CONFIGURAÇÃO
 # ============================================================
-# Foco apenas no "Ouro" (Oposição, Nulidade, Indeferimento)
-IPAS_CODES = {
-    "IPAS423": "Oposição",
-    "IPAS025": "Indeferimento do pedido",
-    "IPAS400": "Nulidade Administrativa",
-    "IPAS029": "Recurso",
-}
 
-# Quais códigos geram leads urgentes (processos sem procurador = oportunidade)
-IPAS_LEAD_CODES = {"IPAS423", "IPAS025", "IPAS400"}
+# Somente esses 3 códigos IPAS geram leads (igual ao extrator_consolidado.py)
+TARGET_CODES = {'IPAS024', 'IPAS423', 'IPAS400'}
 
-# Quais códigos indicam renovação (leads de marcas vencendo)
-IPAS_RENOVACAO_CODES = set()
+IPAS_RENOVACAO_CODES = set()  # Sem renovação por ora
 
 
 # ============================================================

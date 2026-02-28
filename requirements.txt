@@ -1,0 +1,30 @@
+# Sistema 1: Extrator de Leads INPI
+# Python 3.11+
+
+# --- Core ---
+lxml==5.3.0             # Parser XML streaming (iterparse)
+requests==2.32.3        # Download HTTP do ZIP da RPI
+python-dotenv==1.0.1    # Carregar .env
+
+# --- Banco de Dados ---
+sqlalchemy==2.0.36      # ORM / connection layer
+# psycopg2-binary==2.9.10  # Descomentar quando migrar para PostgreSQL
+
+# --- RPA e Scraping ---
+playwright==1.49.1      # Automação de browser anti-detecção
+PyPDF2==3.0.1           # Extração de texto de PDFs do INPI
+
+# --- Anti-CAPTCHA ---
+capmonster-python==3.0  # Resolução de reCAPTCHA v2
+
+# --- Enriquecimento ---
+# (requests já cobre chamadas HTTP para APIs de CNPJ)
+
+# --- Exportação ---
+openpyxl==3.1.5         # Geração de XLSX estilizado
+
+# --- Segurança ---
+cryptography==44.0.0    # Fernet para criptografar senhas das contas INPI
+
+# --- Utilidades ---
+pydantic==2.10.4        # Validação de dados estruturados

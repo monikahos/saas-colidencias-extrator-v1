@@ -1,0 +1,23 @@
+# Sistema 1: Extrator de Leads INPI
+
+# Ambiente
+.env
+*.pyc
+__pycache__/
+*.egg-info/
+
+# Dados locais
+data/
+.tmp/
+
+# Output (planilhas geradas)
+output/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+desktop.ini
+Thumbs.db
+.DS_Store

@@ -207,10 +207,6 @@ def extrair_dados_processo(elem_processo) -> dict | None:
         resumos.append(f"[{dp['tipo']}] Proc: {numero} - Marca: {m_nome} - Origem: {dp['origem']}")
     dados["detalhes_processos"] = " || ".join(resumos) if resumos else ""
     
-    # Descartar estrangeiros (referência: só processar BR)
-    if dados["titular_pais"] and dados["titular_pais"] != "BR":
-        return None
-    
     # --- Procurador ---
     proc_elem = elem_processo.find(TAG_PROCURADOR)
     if proc_elem is not None:

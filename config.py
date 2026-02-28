@@ -37,20 +37,19 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'leads.db'}")
 # ============================================================
 # CÓDIGOS IPAS RELEVANTES (filtro do parser XML)
 # ============================================================
-# Baseado na análise das referências:
+# Foco apenas no "Ouro" (Oposição, Nulidade, Indeferimento)
 IPAS_CODES = {
-    "IPAS009": "Pedido de registro de marca publicado",
-    "IPAS024": "Deferimento do pedido",
-    "IPAS158": "Concessão de registro (marca registrada)",
+    "IPAS423": "Oposição",
     "IPAS025": "Indeferimento do pedido",
-    "IPAS029": "Recurso contra indeferimento",
+    "IPAS400": "Nulidade Administrativa",
+    "IPAS029": "Recurso",
 }
 
-# Quais códigos geram leads (processos sem procurador = oportunidade)
-IPAS_LEAD_CODES = {"IPAS009", "IPAS025", "IPAS029"}
+# Quais códigos geram leads urgentes (processos sem procurador = oportunidade)
+IPAS_LEAD_CODES = {"IPAS423", "IPAS025", "IPAS400"}
 
 # Quais códigos indicam renovação (leads de marcas vencendo)
-IPAS_RENOVACAO_CODES = {"IPAS158"}
+IPAS_RENOVACAO_CODES = set()
 
 
 # ============================================================

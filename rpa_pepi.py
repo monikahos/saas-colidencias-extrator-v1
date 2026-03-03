@@ -164,28 +164,38 @@ def baixar_pdf_peticao(page: Page) -> bytes | None:
         logger.info("Nenhuma petição disponível ou link de acesso ausente.")
         return None
         
-    link_acesso.click()
-    page.wait_for_load_state("networkidle")
+    # O link de acesso abre um POPUP novo para a LGPD
+    with page.context.expect_page() as popup_info:
+        link_acesso.click()
+    popup = popup_info.value
+    popup.wait_for_load_state("networkidle")
     delay_humano()
     
-    # Lidar com a Declaração de Finalidade (LGPD)
+    # Lidar com a Declaração de Finalidade (LGPD) no POPUP
     try:
-        # Verifica se o modal ou a página de declaração apareceu
-        if page.locator('select[name="kdFinalidade"]').count() > 0 or "Declaração da Finalidade" in page.content():
-            logger.info("Preenchendo declaração de finalidade (LGPD)...")
+        if "Declaração da Finalidade" in popup.content() or popup.locator("#codigoHipotese").count() > 0:
+            logger.info("Preenchendo declaração de finalidade (LGPD) no popup...")
             # Seleciona 'Exercício de Direito Fundamental'
-            page.select_option('select[name="kdFinalidade"]', label="Exercício de Direito Fundamental")
+            popup.select_option("#codigoHipotese", label="Exercício de Direito Fundamental")
             # Marca o checkbox de concordância
-            page.locator('input[name="ckpConcordo"]').check()
+            popup.locator("#aceite").check()
             # Clica em Enviar
-            page.locator('input[id="botEnviar"]').click()
-            page.wait_for_load_state("networkidle")
+            popup.locator('input[value="Enviar"]').click()
+            popup.wait_for_load_state("networkidle")
             delay_humano()
+            # O popup geralmente fecha sozinho ou redireciona, mas vamos garantir o foco na main page
     except Exception as e:
-        logger.warning(f"Erro ao lidar com modal de finalidade: {e}")
+        logger.warning(f"Erro ao lidar com popup de finalidade: {e}")
+    finally:
+        if not popup.is_closed():
+            popup.close()
+
+    # Volta para a página principal (que agora deve ter os ícones de PDF liberados)
+    page.bring_to_front()
+    page.reload() # Recarregar para garantir que os ícones reflitam a liberação
+    page.wait_for_load_state("networkidle")
     
     # Procurar as linhas de tabela com despachos originais
-    # As petições agora devem ter o ícone de PDF visível
     linhas = page.locator('tr')
     count = linhas.count()
     
@@ -202,23 +212,23 @@ def baixar_pdf_peticao(page: Page) -> bytes | None:
                 delay_humano()
                 
                 # O botão de download fica dentro de um modal com reCAPTCHA
-                if page.locator('input[value="Download"]').count() > 0 or page.locator('iframe[src*="recaptcha"]').count() > 0:
+                if page.locator('#captchaButton').count() > 0 or page.locator('iframe[src*="recaptcha"]').count() > 0:
                     logger.info("Resolvendo reCAPTCHA de download...")
                     if not resolver_captcha(page):
                         logger.error("Falha ao resolver captcha de download.")
                         return None
                     
-                    # Clicar no botão Download após resolver captcha
+                    # Clicar no botão Download (captchaButton) após resolver captcha
                     try:
                         with page.expect_download(timeout=90000) as download_info:
-                            page.locator('input[value="Download"]').click()
+                            page.locator('#captchaButton').click()
                         
                         download = download_info.value
                         path_temp = TEMP_DIR / download.suggested_filename
                         download.save_as(path_temp)
                         logger.info(f"PDF baixado: {path_temp}")
                         
-                        # Ler o arquivo pra memória e apagar (menos lixo)
+                        # Ler o arquivo pra memória e apagar
                         conteudo = path_temp.read_bytes()
                         path_temp.unlink(missing_ok=True)
                         

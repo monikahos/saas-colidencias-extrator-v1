@@ -168,13 +168,25 @@ def baixar_pdf_peticao(page: Page) -> bytes | None:
     page.wait_for_load_state("networkidle")
     delay_humano()
     
-    # Destruir overlays modais irritantes do INPI via eval
-    page.evaluate('''
-        document.querySelectorAll('.overlay, .modal-backdrop, #overlay').forEach(el => el.remove());
-    ''')
+    # Lidar com a Declaração de Finalidade (LGPD)
+    try:
+        # Verifica se o modal ou a página de declaração apareceu
+        if page.locator('select[name="kdFinalidade"]').count() > 0 or "Declaração da Finalidade" in page.content():
+            logger.info("Preenchendo declaração de finalidade (LGPD)...")
+            # Seleciona 'Exercício de Direito Fundamental'
+            page.select_option('select[name="kdFinalidade"]', label="Exercício de Direito Fundamental")
+            # Marca o checkbox de concordância
+            page.locator('input[name="ckpConcordo"]').check()
+            # Clica em Enviar
+            page.locator('input[id="botEnviar"]').click()
+            page.wait_for_load_state("networkidle")
+            delay_humano()
+    except Exception as e:
+        logger.warning(f"Erro ao lidar com modal de finalidade: {e}")
     
     # Procurar as linhas de tabela com despachos originais
-    linhas = page.locator('table tr')
+    # As petições agora devem ter o ícone de PDF visível
+    linhas = page.locator('tr')
     count = linhas.count()
     
     for i in range(count):
@@ -189,25 +201,31 @@ def baixar_pdf_peticao(page: Page) -> bytes | None:
                 icone_pdf.first.click()
                 delay_humano()
                 
-                # Se aparece botão do captcha, precisamos resolver
-                botao_captcha = page.locator('#captchaButton')
-                if botao_captcha.count() > 0:
+                # O botão de download fica dentro de um modal com reCAPTCHA
+                if page.locator('input[value="Download"]').count() > 0 or page.locator('iframe[src*="recaptcha"]').count() > 0:
+                    logger.info("Resolvendo reCAPTCHA de download...")
                     if not resolver_captcha(page):
+                        logger.error("Falha ao resolver captcha de download.")
                         return None
                     
-                    with page.expect_download(timeout=60000) as download_info:
-                        botao_captcha.click()
-                    
-                    download = download_info.value
-                    path_temp = TEMP_DIR / download.suggested_filename
-                    download.save_as(path_temp)
-                    logger.info(f"PDF baixado: {path_temp}")
-                    
-                    # Ler o arquivo pra memória e apagar (menos lixo)
-                    conteudo = path_temp.read_bytes()
-                    path_temp.unlink(missing_ok=True)
-                    
-                    return conteudo
+                    # Clicar no botão Download após resolver captcha
+                    try:
+                        with page.expect_download(timeout=90000) as download_info:
+                            page.locator('input[value="Download"]').click()
+                        
+                        download = download_info.value
+                        path_temp = TEMP_DIR / download.suggested_filename
+                        download.save_as(path_temp)
+                        logger.info(f"PDF baixado: {path_temp}")
+                        
+                        # Ler o arquivo pra memória e apagar (menos lixo)
+                        conteudo = path_temp.read_bytes()
+                        path_temp.unlink(missing_ok=True)
+                        
+                        return conteudo
+                    except Exception as e:
+                        logger.error(f"Erro ao disparar download do PDF: {e}")
+                        return None
                     
     logger.info("Arquivo alvo 389/394 não encontrado na lista de petições.")
     return None

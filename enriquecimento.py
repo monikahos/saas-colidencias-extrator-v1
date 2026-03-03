@@ -14,7 +14,7 @@ import requests
 import logging
 from config import INFOSIMPLES_TOKEN # Embora n usado ativamente na chamada, fica p compliance se precisar dps
 from db import get_session, Lead, Processo
-from rpa_pepi import executar_rpa_num_processo
+from rpa_pepi import executar_rpa_num_processo, pausa_entre_leads
 
 # ============================================================
 # LOGGING
@@ -57,11 +57,9 @@ def recalcular_score_final(lead: Lead) -> None:
     score_atual = lead.score or 0
     
     # Bonificações da Directive 03
-    if lead.email:
+    if lead.email_titular:
         score_atual += 20
-        # Check heurístico (Email corporativo = + qualitativo)
-        if lead.email_tipo == "titular":
-            score_atual += 10
+        score_atual += 10 # Email direto = Qualitativo elevado
             
     if lead.telefone:
         score_atual += 10
@@ -125,17 +123,12 @@ def processar_leads_pendentes(limite: int = 50):
             dados_rpa = executar_rpa_num_processo(lead.numero_processo)
             
             if dados_rpa.get("status") == "sucesso":
-                if dados_rpa.get("cnpj"):
-                    cnpj_titular = dados_rpa["cnpj"]
-                if dados_rpa.get("email"):
-                    email_titular = dados_rpa["email"]
-                    # Regra heurística PDF
-                    if "marca" in email_titular or "patente" in email_titular or "advocacia" in email_titular:
-                        lead.email_tipo = "escritorio"
-                    else:
-                        lead.email_tipo = "titular"
+                lead.cnpj_dados = {"cnpj_extraido_pdf": dados_rpa.get("cnpj")}
+                lead.email_titular = dados_rpa.get("email_titular")
+                lead.email_procurador = dados_rpa.get("email_procurador")
+                lead.nome_procurador = dados_rpa.get("nome_procurador")
+                lead.pdf_path = dados_rpa.get("pdf_path")
             
-            lead.email = email_titular
             lead.fonte_enriquecimento = "pepi_pdf_rpa"
             
             # Atualiza score matemático da Directive 03
@@ -146,6 +139,9 @@ def processar_leads_pendentes(limite: int = 50):
             
             session.commit()
             logger.info(f"Lead {lead.numero_processo} - STATUS = {lead.classificacao} - Score = {lead.score}")
+            
+            # Pausa humana longa entre os leads
+            pausa_entre_leads()
             
     except Exception as e:
         logger.error(f"Erro catastrófico no Orquestrador de Enriquecimento: {e}")

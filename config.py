@@ -20,11 +20,13 @@ load_dotenv(_ENV_PATH)
 BASE_DIR = Path(__file__).parent
 TEMP_DIR = BASE_DIR / os.getenv("TEMP_DIR", ".tmp")
 OUTPUT_DIR = BASE_DIR / os.getenv("OUTPUT_DIR", "output")
+PETICOES_DIR = OUTPUT_DIR / "peticoes"
 DATA_DIR = BASE_DIR / "data"
 
 # Criar pastas se não existirem
 TEMP_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+PETICOES_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
 
 

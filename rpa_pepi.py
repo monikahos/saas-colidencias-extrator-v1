@@ -26,9 +26,10 @@ from config import (
     INPI_RECAPTCHA_SITE_KEY, 
     CAPMONSTER_API_KEY,
     TEMP_DIR,
+    PETICOES_DIR,
     PROXY_LIST
 )
-from db import get_session, ContaINPI, Lead
+from db import get_session, ContaINPI, Lead, Processo
 
 
 # ============================================================
@@ -81,8 +82,14 @@ def marcar_conta_falha(conta_id: int):
 # ============================================================
 
 def delay_humano():
-    """Pausa aleatória entre 1.5s e 4.0s para simular humano."""
-    time.sleep(random.uniform(1.5, 4.0))
+    """Pausa aleatória entre 3.0s e 8.0s para simular humano nas ações."""
+    time.sleep(random.uniform(3.0, 8.0))
+
+def pausa_entre_leads():
+    """Pausa longa entre processos para evitar bloqueio de IP/Conta."""
+    segundos = random.randint(60, 120)
+    logger.info(f"Aguardando {segundos} segundos antes do próximo lead (simulação humana)...")
+    time.sleep(segundos)
 
 
 def resolver_captcha(page: Page) -> bool:
@@ -230,15 +237,12 @@ def baixar_pdf_peticao(page: Page) -> bytes | None:
                             page.locator('#captchaButton').click()
                         
                         download = download_info.value
-                        path_temp = TEMP_DIR / download.suggested_filename
-                        download.save_as(path_temp)
-                        logger.info(f"PDF baixado: {path_temp}")
+                        filename = f"peticao_{page.url.split('CodPedido=')[-1].split('&')[0]}.pdf"
+                        path_final = PETICOES_DIR / filename
+                        download.save_as(path_final)
+                        logger.info(f"PDF salvo em: {path_final}")
                         
-                        # Ler o arquivo pra memória e apagar
-                        conteudo = path_temp.read_bytes()
-                        path_temp.unlink(missing_ok=True)
-                        
-                        return conteudo
+                        return str(path_final).encode() # Retorna o path como bytes para compatibilidade temporária ou ajuste dps
                     except Exception as e:
                         logger.error(f"Erro ao disparar download do PDF: {e}")
                         return None
@@ -275,12 +279,16 @@ def apagar_rastro_acesso(page: Page):
 # EXTRAÇÃO DO PDF (LOCAL)
 # ============================================================
 
-def extrair_dados_do_pdf(pdf_bytes: bytes) -> dict:
-    """Usa PyPDF2 para ler bytes do PDF e aplicar Regex extraindo Email e CNPJ."""
-    dados = {"cnpj": None, "email": None}
+def extrair_dados_do_pdf(pdf_path_bytes: bytes) -> dict:
+    """Extrai Email do Titular, Email do Procurador e Nome do Procurador do PDF salvo."""
+    dados = {"cnpj": None, "email_titular": None, "email_procurador": None, "nome_procurador": None, "pdf_path": None}
+    
+    path_str = pdf_path_bytes.decode()
+    path_file = Path(path_str)
+    dados["pdf_path"] = path_str
     
     try:
-        reader = PyPDF2.PdfReader(io.BytesIO(pdf_bytes))
+        reader = PyPDF2.PdfReader(path_file)
         texto_completo = ""
         for i in range(len(reader.pages)):
             page_text = reader.pages[i].extract_text()
@@ -288,21 +296,29 @@ def extrair_dados_do_pdf(pdf_bytes: bytes) -> dict:
                 texto_completo += page_text + "\n"
         
         # Regex CNPJ
-        # Procura algo como 'cpf/cnpj/número inpi: 12.345.678/0001-90'
         match_cnpj = re.search(r'(?i)cpf/cnpj/n.mero inpi:\s*([0-9\.\-/]+)', texto_completo)
         if match_cnpj:
-            cnpj_cru = match_cnpj.group(1).strip()
-            # Deixar só os números
-            dados["cnpj"] = re.sub(r'[^0-9]', '', cnpj_cru)
+            dados["cnpj"] = re.sub(r'[^0-9]', '', match_cnpj.group(1).strip())
             
-        # Regex Email
-        # Procura qualquer email válido no texto (simplificado)
-        match_email = re.search(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', texto_completo)
-        if match_email:
-            dados["email"] = match_email.group(0).strip().lower()
+        # Extração de E-mails
+        emails = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', texto_completo)
+        for email in emails:
+            email_lower = email.lower()
+            if any(key in email_lower for key in ["adv", "marca", "patente", "juridico", "contato@", "atendimento@"]):
+                if not dados["email_procurador"]:
+                    dados["email_procurador"] = email_lower
+            else:
+                if not dados["email_titular"]:
+                    dados["email_titular"] = email_lower
+                    
+        # Tentativa de pegar Nome do Procurador
+        # Geralmente segue o rótulo "Procurador:" ou aparece após a OAB
+        match_proc = re.search(r'(?i)Procurador:\s*([^\n]+)', texto_completo)
+        if match_proc:
+            dados["nome_procurador"] = match_proc.group(1).strip()
             
     except Exception as e:
-        logger.error(f"Erro ao parsear PDF: {e}")
+        logger.error(f"Erro ao parsear PDF {path_file}: {e}")
         
     return dados
 
@@ -322,7 +338,7 @@ def executar_rpa_num_processo(numero_processo: str) -> dict:
     
     from playwright.sync_api import sync_playwright
     
-    dados = {"status": "pendente", "email": None, "cnpj": None}
+    dados = {"status": "pendente", "email_titular": None, "email_procurador": None, "nome_procurador": None, "cnpj": None, "pdf_path": None}
     
     with sync_playwright() as p:
         # Configuração de Proxy se existir no .env

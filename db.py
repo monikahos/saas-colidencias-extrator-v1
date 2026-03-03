@@ -67,9 +67,11 @@ class Lead(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     numero_processo = Column(Text, ForeignKey("processo.numero_processo"), unique=True)
-    email = Column(Text, nullable=True)
+    email_titular = Column(Text, nullable=True) # E-mail direto da empresa extraído do PDF
+    email_procurador = Column(Text, nullable=True) # E-mail do escritório/procurador
+    nome_procurador = Column(Text, nullable=True) # Nome do procurador extraído do PDF
     telefone = Column(Text, nullable=True)
-    email_tipo = Column(Text, nullable=True)  # 'direto' | 'escritorio'
+    pdf_path = Column(Text, nullable=True)  # Caminho local do PDF salvo na VPS
     cnpj_dados = Column(JSON, nullable=True)  # Razão social, endereço, etc.
     tipo_pessoa = Column(Text, nullable=True) # Pessoa Jurídica | Pessoa Física
     score = Column(Integer, default=0)  # 0-100

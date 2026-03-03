@@ -159,9 +159,15 @@ def buscar_processo(page: Page, numero_processo: str) -> bool:
 
 def baixar_pdf_peticao(page: Page) -> bytes | None:
     """Navega para petições, busca cód 389/394, resolve captcha e baixa o PDF."""
-    link_acesso = page.locator('a:has-text("Clique aqui para ter acesso")')
-    if link_acesso.count() == 0:
-        logger.info("Nenhuma petição disponível ou link de acesso ausente.")
+    # Seletor robusto: busca pelo link que dispara a solicitação de acesso (independente do texto exato)
+    link_acesso = page.locator('a[href*="AmploAcesso"], a:has-text("Clique aqui para ter acesso")').first
+    
+    try:
+        # Espera o link aparecer por até 10 segundos e faz scroll até ele
+        link_acesso.wait_for(state="visible", timeout=10000)
+        link_acesso.scroll_into_view_if_needed()
+    except Exception:
+        logger.info("Link de acesso às petições não localizado ou processo sem petições públicas.")
         return None
         
     # O link de acesso abre um POPUP novo para a LGPD
@@ -179,11 +185,11 @@ def baixar_pdf_peticao(page: Page) -> bytes | None:
             popup.select_option("#codigoHipotese", label="Exercício de Direito Fundamental")
             # Marca o checkbox de concordância
             popup.locator("#aceite").check()
-            # Clica em Enviar
-            popup.locator('input[value="Enviar"]').click()
+            # Clica em Enviar (pode ser um input ou link estilizado como botão)
+            btn_enviar = popup.locator('input[value="Enviar"], .div-moddal-sol-amplo-acesso-btn-enviar')
+            btn_enviar.first.click()
             popup.wait_for_load_state("networkidle")
             delay_humano()
-            # O popup geralmente fecha sozinho ou redireciona, mas vamos garantir o foco na main page
     except Exception as e:
         logger.warning(f"Erro ao lidar com popup de finalidade: {e}")
     finally:

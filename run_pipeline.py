@@ -12,8 +12,8 @@ USO:
     python run_pipeline.py              # Calcula a RPI da semana automaticamente
     python run_pipeline.py --rpi 2878   # Força um número específico
 
-CRON (toda terça às 10h):
-    0 10 * * 2 cd /app/execution && /app/execution/.venv/bin/python run_pipeline.py >> /var/log/pipeline.log 2>&1
+CRON (toda quarta às 09h):
+    0 9 * * 3 cd ~/saas-colidencias/execution && .venv/bin/python run_pipeline.py >> ~/saas-colidencias/execution/pipeline.log 2>&1
 """
 
 import argparse

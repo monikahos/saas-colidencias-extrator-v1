@@ -21,6 +21,8 @@ import sys
 import traceback
 from datetime import date, timedelta
 
+import random
+import time
 import requests
 
 from config import RESEND_API_KEY, NOTIFY_EMAIL, LEADS_ENRICH_LIMIT
@@ -139,6 +141,15 @@ def _email_erro(numero_rpi: int, erro: str) -> str:
     """
 
 
+def aplicar_atraso_furtivo(max_minutos: int = 45):
+    """Aguarda um tempo aleatório para evitar padrões de execução fixos."""
+    segundos = random.randint(0, max_minutos * 60)
+    minutos = segundos // 60
+    restante = segundos % 60
+    print(f"🕵️  MODO FURTIVO ATIVO: Aguardando {minutos}m {restante}s antes de iniciar...")
+    time.sleep(segundos)
+
+
 # ============================================================
 # PIPELINE PRINCIPAL
 # ============================================================
@@ -201,6 +212,11 @@ def main():
     criar_tabelas()
     
     numero_rpi = args.rpi or calcular_rpi_da_semana()
+    
+    # Aplica o atraso se estiver rodando no automático (sem RPI forçada)
+    if not args.rpi:
+        aplicar_atraso_furtivo(max_minutos=50) # Varia em até 50 minutos
+        
     print(f"📰 RPI alvo: {numero_rpi}")
     
     executar_pipeline(numero_rpi)

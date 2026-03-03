@@ -119,8 +119,7 @@ def login_inpi(page: Page, login: str, senha_enc: str) -> bool:
     logger.info(f"Tentando login com usuário: {login}")
     page.goto(INPI_URL_BASE)
     
-    # Preencher credenciais (senha aqui deveria ser descriptografada em prd)
-    # Por hora, assume que o banco local tem a senha em plaintext
+    # Preencher credenciais
     page.locator('input[name="T_Login"]').fill(login)
     page.locator('input[name="T_Senha"]').fill(senha_enc)
     
@@ -128,8 +127,9 @@ def login_inpi(page: Page, login: str, senha_enc: str) -> bool:
     page.wait_for_load_state("networkidle")
     delay_humano()
     
-    # Verifica se sucesso (tem link pra pesquisa)
-    if page.locator('a[href*="Pesquisa_num_processo.jsp"]').count() > 0:
+    # Verifica se sucesso: o INPI mostra "Login: <usuario>" na página pós-login
+    texto_pagina = page.inner_text("body")
+    if f"Login: {login}" in texto_pagina or f"login: {login}" in texto_pagina.lower():
         logger.info("Login bem-sucedido.")
         return True
     

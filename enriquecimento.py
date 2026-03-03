@@ -94,8 +94,13 @@ def processar_leads_pendentes(limite: int = 50):
     session = get_session()
     
     try:
-        # Buscar leads pendentes na DB local
-        leads = session.query(Lead).filter(Lead.status == "PENDENTE").limit(limite).all()
+        # Buscar leads pendentes na DB local, ordenados pelos melhores Scores
+        query = session.query(Lead).filter(Lead.status == "PENDENTE").order_by(Lead.score.desc())
+        
+        if limite and limite > 0:
+            query = query.limit(limite)
+            
+        leads = query.all()
         
         if not leads:
             logger.info("Nenhum lead pendente para enriquecimento no banco SQLite.")

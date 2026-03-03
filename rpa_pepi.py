@@ -25,7 +25,8 @@ from config import (
     INPI_URL_PESQUISA, 
     INPI_RECAPTCHA_SITE_KEY, 
     CAPMONSTER_API_KEY,
-    TEMP_DIR
+    TEMP_DIR,
+    PROXY_LIST
 )
 from db import get_session, ContaINPI, Lead
 
@@ -290,12 +291,21 @@ def executar_rpa_num_processo(numero_processo: str) -> dict:
     dados = {"status": "pendente", "email": None, "cnpj": None}
     
     with sync_playwright() as p:
-        # Lança o Chromium local invisivel (headless)
-        browser = p.chromium.launch(headless=True)
+        # Configuração de Proxy se existir no .env
+        launch_args = {"headless": True}
+        context_args = {
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        }
+        
+        if PROXY_LIST:
+            proxy_escolhido = random.choice(PROXY_LIST)
+            logger.info(f"Usando Proxy para navegação: {proxy_escolhido.split('@')[-1]}")
+            launch_args["proxy"] = {"server": proxy_escolhido}
+        
+        # Lança o Chromium
+        browser = p.chromium.launch(**launch_args)
         # Isolar sessão por conta do INPI
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        context = browser.new_context(**context_args)
         page = context.new_page()
         
         try:

@@ -43,7 +43,7 @@ THIN_BORDER = Border(
 # EXPORTAÇÃO
 # ============================================================
 
-def exportar_xlsx(classificacao: str | None = None, score_min: int = 0):
+def exportar_xlsx(classificacao: str | None = None, score_min: int = 0, somente_pj: bool = False):
     """
     Consulta os leads no banco SQLite e gera o arquivo XLSX.
     """
@@ -56,6 +56,9 @@ def exportar_xlsx(classificacao: str | None = None, score_min: int = 0):
         if classificacao:
             # Garante que a busca por classificação considere emojis ou texto se houver
             query = query.filter(Lead.classificacao.contains(classificacao.upper()))
+            
+        if somente_pj:
+            query = query.filter(Lead.tipo_pessoa == "Pessoa Jurídica")
             
         leads = query.order_by(Lead.score.desc()).all()
         
@@ -140,10 +143,9 @@ def exportar_xlsx(classificacao: str | None = None, score_min: int = 0):
             adjusted_width = (max_length + 2)
             ws.column_dimensions[column].width = min(adjusted_width, 50)
 
-        # Salvar
+        # Salvar — sempre sobrescreve o mesmo arquivo (sem acumular)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-        filename = f"leads_extraidos_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
-        save_path = OUTPUT_DIR / filename
+        save_path = OUTPUT_DIR / "leads_extraidos.xlsx"
         wb.save(save_path)
         
         logger.info(f"✅ Sucesso! {len(leads)} leads exportados para: {save_path}")
@@ -158,9 +160,10 @@ def exportar_xlsx(classificacao: str | None = None, score_min: int = 0):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Exporta leads qualificados para XLSX")
-    parser.add_argument("--quentes", action="store_true", help="Exportar apenas leads QUENTES")
+    parser.add_argument("--quentes", action="store_true", help="Exportar apenas leads A (Alta Prioridade)")
     parser.add_argument("--score", type=int, default=0, help="Score mínimo para exportação")
+    parser.add_argument("--somente-pj", action="store_true", help="Exportar apenas empresas (Pessoa Jurídica)")
     args = parser.parse_args()
-    classif = "TIER A" if args.quentes else None
+    classif = "A (Alta Prioridade)" if args.quentes else None
     
-    exportar_xlsx(classificacao=classif, score_min=args.score)
+    exportar_xlsx(classificacao=classif, score_min=args.score, somente_pj=args.somente_pj)

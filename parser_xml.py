@@ -1,7 +1,6 @@
 """
 parser_xml.py — Worker 02: Parser Streaming do XML da RPI
 
-Baseado na Directive 02 (adaptado para o Sistema 1 — sem Redis, sem S3).
 Faz streaming do XML da RPI usando lxml.etree.iterparse,
 filtra por códigos IPAS relevantes, calcula lead score inicial
 e insere no banco de dados.
@@ -16,17 +15,18 @@ NÃO faz nenhuma chamada externa. Apenas lê o XML local e grava no banco.
 
 import argparse
 import sys
-from datetime import date, datetime
+from datetime import datetime
 from pathlib import Path
 
 from lxml import etree
 import re
 
-from config import TARGET_CODES, IPAS_RENOVACAO_CODES, TEMP_DIR
+from config import TARGET_CODES
 from db import criar_tabelas, get_session, RPIHistory, Processo, Lead
 
+
 # ============================================================
-# NLP E EXCLUSÕES (Vendas)
+# FILTROS E CLASSIFICAÇÃO
 # ============================================================
 
 EXCLUDE_KEYWORDS = [
@@ -47,39 +47,43 @@ PJ_KEYWORDS = [
 ]
 PJ_PATTERN = re.compile('|'.join(PJ_KEYWORDS), re.IGNORECASE)
 
-def is_concorrente(nome):
-    if not nome: return False
-    nome_lower = nome.lower()
-    return any(keyword in nome_lower for keyword in EXCLUDE_KEYWORDS)
 
-def classificar_tipo_pessoa(nome):
-    if not nome: return "Pessoa Física"
-    if PJ_PATTERN.search(nome): return "Pessoa Jurídica"
+def is_concorrente(nome: str) -> bool:
+    """Retorna True se o nome pertence a um escritório/concorrente."""
+    if not nome:
+        return False
+    nome_lower = nome.lower()
+    return any(kw in nome_lower for kw in EXCLUDE_KEYWORDS)
+
+
+def classificar_tipo_pessoa(nome: str) -> str:
+    """Classifica como PJ ou PF com base em keywords no nome."""
+    if not nome:
+        return "Pessoa Física"
+    if PJ_PATTERN.search(nome):
+        return "Pessoa Jurídica"
     return "Pessoa Física"
 
-def extrair_oponente(texto):
-    if not texto: return "N/A"
+
+def extrair_oponente(texto: str) -> str:
+    """Extrai o nome do oponente do texto complementar do despacho."""
+    if not texto:
+        return "N/A"
     match = re.search(r'(?:oposta por|oposto por|por)\s*(.+)', texto, re.IGNORECASE)
     if match:
-        nome_oponente = match.group(1).strip()
-        if nome_oponente.endswith('.'): nome_oponente = nome_oponente[:-1]
-        return nome_oponente
+        nome = match.group(1).strip().rstrip('.')
+        return nome
     return "N/A"
 
 
 # ============================================================
-# CONSTANTES
+# CONSTANTES XML
 # ============================================================
 
-# Tags XML que o INPI usa (aprendidas das referências)
 TAG_PROCESSO = "processo"
 TAG_DESPACHO = "despacho"
-TAG_MARCA = "marca"
-TAG_TITULAR = "titular"
-TAG_PROCURADOR = "procurador"
 TAG_CLASSE_NICE = "classe-nice"
 
-# Filtro de data mínima de depósito (referência: extrator_leads usava 2010)
 ANO_DEPOSITO_MINIMO = 2010
 
 
@@ -90,20 +94,51 @@ ANO_DEPOSITO_MINIMO = 2010
 def detectar_encoding(caminho_xml: Path) -> str:
     """
     Lê os primeiros bytes do XML para detectar o encoding.
-    Aprendizado: o INPI alterna entre ISO-8859-1 e UTF-8 sem aviso.
+    O INPI alterna entre ISO-8859-1 e UTF-8 sem aviso.
     """
     with open(caminho_xml, "rb") as f:
-        cabecalho = f.read(200)
+        cabecalho = f.read(200).lower()
     
-    if b"iso-8859-1" in cabecalho.lower():
+    if b"iso-8859-1" in cabecalho or b"latin" in cabecalho:
         return "iso-8859-1"
-    elif b"utf-8" in cabecalho.lower():
-        return "utf-8"
-    elif b"latin" in cabecalho.lower():
-        return "iso-8859-1"
-    else:
-        # Default seguro
-        return "utf-8"
+    return "utf-8"
+
+
+# ============================================================
+# LEAD SCORING
+# ============================================================
+
+def calcular_score_inicial(dados: dict) -> int:
+    """
+    Calcula o score inicial do lead.
+    - PJ: +30
+    - IPAS400 (Nulidade): +50
+    - IPAS423 (Oposição): +40
+    - IPAS024 (Indeferimento): +15
+    """
+    score = 0
+    
+    if dados.get("tipo_pessoa") == "Pessoa Jurídica":
+        score += 30
+    
+    for cod in dados.get("codigos_ocorridos", []):
+        if cod == "IPAS400":
+            score += 50
+        elif cod == "IPAS423":
+            score += 40
+        elif cod == "IPAS024":
+            score += 15
+    
+    return min(score, 100)
+
+
+def classificar_lead(score: int) -> str:
+    """Classifica o lead em Tiers A/B/C."""
+    if score >= 70:
+        return "A (Alta Prioridade)"
+    elif score >= 40:
+        return "B (Prioridade Média)"
+    return "C (Baixa Prioridade)"
 
 
 # ============================================================
@@ -113,80 +148,64 @@ def detectar_encoding(caminho_xml: Path) -> str:
 def extrair_dados_processo(elem_processo) -> dict | None:
     """
     Extrai os campos relevantes de um elemento <processo> do XML.
-    Lógica baseada no extrator_consolidado.py do usuário:
-    - Se tiver procurador: descartar
-    - Só importa: IPAS400, IPAS423, IPAS024
-    - Agrupar por titular_nome
     Retorna None se o processo deve ser descartado.
+    
+    Regras de descarte:
+    - Sem número de processo
+    - Tem procurador (já tem representação)
+    - Nenhum despacho com código IPAS relevante
+    - Titular estrangeiro (sem UF)
+    - Titular é concorrente (escritório de marca/advocacia)
+    - Data de depósito anterior a ANO_DEPOSITO_MINIMO
     """
     numero = elem_processo.get("numero", "").strip()
     if not numero:
         return None
     
-    # === REGRA 1: PROCURADOR (se tiver, descarta TUDO) ===
+    # Procurador → descarta (já tem representação)
     if elem_processo.find("procurador") is not None:
         return None
-
-    dados = {
-        "numero_processo": numero,
-        "marca_nome": None,
-        "titular_nome": None,
-        "titular_documento": None,
-        "titular_pais": None,
-        "titular_uf": None,
-        "tem_procurador": False,
-        "procurador_nome": None,
-        "classe_nice": None,
-        "codigo_ipas": None,
-        "data_deposito": None,
-        "tipo_marca": None,
-        "tipo_pessoa": "Pessoa Física",
-        "codigos_ocorridos": [],
-        "detalhes_processos": None,
-    }
     
-    despachos_relevantes = []
-    detalhes_processos_list = []
+    # Titular — extrair ANTES do loop de despachos (pertence ao processo)
+    titular_elem = elem_processo.find(".//titular")
+    titular_nome = ""
+    titular_uf = ""
+    titular_doc = None
+    if titular_elem is not None:
+        titular_nome = titular_elem.get("nome-razao-social", "").strip()
+        titular_uf = titular_elem.get("uf", "").strip()
+        titular_doc = titular_elem.get("cnpj-cpf", "").strip() or None
     
-    # === LOOP DESPACHOS (somente TARGET_CODES) ===
+    # Estrangeiro (sem UF) → descarta
+    if not titular_uf or titular_uf == "N/A":
+        return None
+    
+    # Concorrente → descarta
+    if is_concorrente(titular_nome):
+        return None
+    
+    # Marca
+    marca_elem = elem_processo.find(".//marca/nome")
+    marca_nome = marca_elem.text.strip() if (marca_elem is not None and marca_elem.text) else "N/A"
+    
+    # Loop despachos — buscar o PRIMEIRO código IPAS relevante
+    codigo_ipas = None
+    detalhes = None
+    
     for desp in elem_processo.iter(TAG_DESPACHO):
         codigo = desp.get("codigo", "").strip().upper()
-        if not codigo:
-            continue
-        
-        # Só processa os 3 códigos relevantes
         if codigo not in TARGET_CODES:
             continue
         
-        # --- Titular (extrair aqui pois precisamos para filtros) ---
-        titular_elem = elem_processo.find(".//titular")
-        titular_nome = ""
-        titular_uf = ""
-        if titular_elem is not None:
-            titular_nome = titular_elem.get("nome-razao-social", "").strip()
-            titular_uf = titular_elem.get("uf", "").strip()
-        
-        # Descartar estrangeiros (sem UF)
-        if not titular_uf or titular_uf == "N/A":
-            break
-        
-        # Descartar concorrentes (escritórios de marca/advocacia)
-        if is_concorrente(titular_nome):
-            break
-        
         # Tipo de procedimento
         if codigo == "IPAS400":
-            tipo_procedimento = "Nulidade"
+            tipo = "Nulidade"
         elif codigo == "IPAS423":
-            tipo_procedimento = "Oposição"
-        else:  # IPAS024
-            tipo_procedimento = "Indeferimento"
+            tipo = "Oposição"
+        else:
+            tipo = "Indeferimento"
         
-        # Extrair marca
-        marca_elem = elem_processo.find(".//marca/nome")
-        marca_nome = marca_elem.text.strip() if (marca_elem is not None and marca_elem.text) else "N/A"
-        
-        # Extrair texto complementar (para quem pediu a oposição)
+        # Texto complementar (quem pediu a oposição/nulidade)
         texto_comp_elem = desp.find("texto-complementar")
         texto_comp = ""
         if texto_comp_elem is not None and texto_comp_elem.text:
@@ -194,92 +213,123 @@ def extrair_dados_processo(elem_processo) -> dict | None:
         
         quem_pediu = extrair_oponente(texto_comp) if codigo != "IPAS024" else "INPI (Governo)"
         
-        resumo = f"[{tipo_procedimento}] Proc: {numero} - Marca: {marca_nome} - Origem: {quem_pediu}"
-        detalhes_processos_list.append(resumo)
-        despachos_relevantes.append(codigo)
-        
-        # Preencher dados do titular (igual ao extrator_consolidado faz no defaultdict)
-        dados["titular_nome"] = titular_nome
-        dados["titular_uf"] = titular_uf
-        dados["titular_documento"] = titular_elem.get("cnpj-cpf", "").strip() or None if titular_elem is not None else None
-        dados["titulo_pais"] = titular_elem.get("pais", "").strip().upper() or None if titular_elem is not None else None
-        dados["tipo_pessoa"] = classificar_tipo_pessoa(titular_nome)
-        dados["marca_nome"] = marca_nome
-        
-        break  # Só pega o PRIMEIRO despacho relevante (igual ao extrator_consolidado)
+        codigo_ipas = codigo
+        detalhes = f"[{tipo}] Proc: {numero} - Marca: {marca_nome} - Origem: {quem_pediu}"
+        break  # Só pega o PRIMEIRO despacho relevante
     
-    # Se nenhum despacho relevante, descartar
-    if not despachos_relevantes:
+    if not codigo_ipas:
         return None
     
-    dados["codigo_ipas"] = despachos_relevantes[-1]
-    dados["codigos_ocorridos"] = despachos_relevantes
-    dados["detalhes_processos"] = " || ".join(detalhes_processos_list) if detalhes_processos_list else None
-    
-    # --- Classe NICE ---
+    # Classe NICE
+    classe_nice = None
     classe_elem = elem_processo.find(TAG_CLASSE_NICE)
     if classe_elem is not None:
-        dados["classe_nice"] = classe_elem.get("codigo", "").strip() or None
+        classe_nice = classe_elem.get("codigo", "").strip() or None
     
-    # --- Data de Depósito ---
+    # Data de depósito
+    data_deposito = None
     deposito_elem = elem_processo.find("data-deposito")
     if deposito_elem is not None and deposito_elem.text:
         try:
-            dados["data_deposito"] = datetime.strptime(
-                deposito_elem.text.strip(), "%d/%m/%Y"
-            ).date()
+            data_deposito = datetime.strptime(deposito_elem.text.strip(), "%d/%m/%Y").date()
         except ValueError:
             pass
     
     # Filtro de data mínima
-    if dados["data_deposito"] and dados["data_deposito"].year < ANO_DEPOSITO_MINIMO:
+    if data_deposito and data_deposito.year < ANO_DEPOSITO_MINIMO:
         return None
     
-    return dados
+    tipo_pessoa = classificar_tipo_pessoa(titular_nome)
+    
+    return {
+        "numero_processo": numero,
+        "marca_nome": marca_nome,
+        "titular_nome": titular_nome,
+        "titular_documento": titular_doc,
+        "titular_uf": titular_uf,
+        "classe_nice": classe_nice,
+        "codigo_ipas": codigo_ipas,
+        "data_deposito": data_deposito,
+        "tipo_pessoa": tipo_pessoa,
+        "codigos_ocorridos": [codigo_ipas],
+        "detalhes_processos": detalhes,
+    }
 
 
 # ============================================================
-# LEAD SCORING INICIAL (Baseado no Extrator_Consolidado do Usuário)
+# PERSISTÊNCIA NO BANCO
 # ============================================================
 
-def calcular_score_inicial(dados: dict) -> int:
-    """
-    Calcula o score inicial do lead.
-    Lógica idêntica ao extrator_consolidado.py:
-      - PJ: +30
-      - IPAS400 (Nulidade): +50
-      - IPAS423 (Oposição): +40
-      - IPAS024 (Indeferimento): +15
-    Pessoas físicas são incluídas mas com pontuação menor.
-    """
-    score = 0
-    codigos = dados.get("codigos_ocorridos", [])
-    tipo_pessoa = dados.get("tipo_pessoa", "Pessoa Física")
-    
-    # Regra 1: Capacidade de pagamento (PJ > PF)
-    if tipo_pessoa == "Pessoa Jurídica":
-        score += 30
-    
-    # Regra 2: Gravidade e volume dos despachos
-    for cod in codigos:
-        if cod == "IPAS400":
-            score += 50    # Nulidade (Altíssima)
-        elif cod == "IPAS423":
-            score += 40   # Oposição (Alta)
-        elif cod == "IPAS024":
-            score += 15   # Indeferimento (Regular)
-    
-    return min(score, 100)  # Cap em 100
-
-
-def classificar_lead(score: int) -> str:
-    """Classifica o lead em Tiers (idêntico ao extrator_consolidado.py)."""
-    if score >= 70:
-        return "A (Alta Prioridade)"
-    elif score >= 40:
-        return "B (Prioridade Média)"
+def _upsert_processo(session, dados: dict, numero_rpi: int | None):
+    """Insere ou atualiza um Processo no banco."""
+    existente = session.query(Processo).get(dados["numero_processo"])
+    if existente:
+        existente.marca_nome = dados["marca_nome"]
+        existente.codigo_ipas = dados["codigo_ipas"]
+        existente.titular_nome = dados["titular_nome"]
+        existente.titular_documento = dados["titular_documento"]
+        existente.classe_nice = dados["classe_nice"]
     else:
-        return "C (Baixa Prioridade)"
+        session.add(Processo(
+            numero_processo=dados["numero_processo"],
+            marca_nome=dados["marca_nome"],
+            titular_nome=dados["titular_nome"],
+            titular_documento=dados["titular_documento"],
+            classe_nice=dados["classe_nice"],
+            codigo_ipas=dados["codigo_ipas"],
+            titular_uf=dados["titular_uf"],
+            data_deposito=dados["data_deposito"],
+            numero_rpi=numero_rpi,
+        ))
+
+
+def _upsert_lead(session, dados: dict, leads_cache: dict) -> bool:
+    """
+    Insere ou agrupa um Lead no banco.
+    Retorna True se criou um lead novo.
+    """
+    titular = dados.get("titular_nome")
+    if not titular:
+        return False
+    
+    lead_existente = leads_cache.get(titular)
+    
+    if not lead_existente:
+        lead_existente = session.query(Lead).join(Processo).filter(
+            Processo.titular_nome == titular
+        ).first()
+        if lead_existente:
+            leads_cache[titular] = lead_existente
+    
+    if lead_existente:
+        # Agrupar: mesmo titular com múltiplos ataques
+        lead_existente.quantidade_ataques = (lead_existente.quantidade_ataques or 0) + 1
+        
+        novo_det = dados.get("detalhes_processos")
+        if novo_det:
+            if lead_existente.detalhes_processos:
+                lead_existente.detalhes_processos += f" || {novo_det}"
+            else:
+                lead_existente.detalhes_processos = novo_det
+        
+        lead_existente.score = min((lead_existente.score or 0) + 10, 100)
+        lead_existente.classificacao = classificar_lead(lead_existente.score)
+        return False
+    
+    # Criar novo lead
+    score = calcular_score_inicial(dados)
+    novo_lead = Lead(
+        numero_processo=dados["numero_processo"],
+        score=score,
+        classificacao=classificar_lead(score),
+        tipo_pessoa=dados.get("tipo_pessoa"),
+        quantidade_ataques=1,
+        detalhes_processos=dados.get("detalhes_processos"),
+        status="PENDENTE",
+    )
+    session.add(novo_lead)
+    leads_cache[titular] = novo_lead
+    return True
 
 
 # ============================================================
@@ -291,7 +341,6 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
     Faz streaming do XML gigante usando iterparse.
     NÃO carrega o arquivo inteiro na memória.
     """
-    criar_tabelas()
     session = get_session()
     
     encoding = detectar_encoding(caminho_xml)
@@ -300,132 +349,48 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
     print(f"🔍 Filtrando IPAS: {TARGET_CODES}")
     print(f"{'='*60}")
     
-    total_processos_xml = 0
+    total_processos = 0
     total_relevantes = 0
     total_leads = 0
-    
-    leads_cache = {}  # Cache de 'titular_nome' -> objeto Lead
+    leads_cache = {}
     
     try:
-        # iterparse: lê o XML como stream, processando tag por tag
         context = etree.iterparse(
             str(caminho_xml),
             events=("end",),
             tag=TAG_PROCESSO,
             encoding=encoding,
-            recover=True  # Tolera erros no XML (o INPI às vezes gera XML mal-formado)
+            recover=True,
         )
         
-        for event, elem in context:
-            total_processos_xml += 1
+        for _event, elem in context:
+            total_processos += 1
             
-            # Progresso a cada 5000 processos
-            if total_processos_xml % 5000 == 0:
-                print(f"  ... {total_processos_xml} processos lidos, {total_relevantes} relevantes")
+            if total_processos % 5000 == 0:
+                print(f"  ... {total_processos} processos lidos, {total_relevantes} relevantes")
             
-            # Extrair dados
             dados = extrair_dados_processo(elem)
             
+            # Limpar memória do elemento XML (CRUCIAL pro iterparse)
+            elem.clear()
+            while elem.getprevious() is not None:
+                del elem.getparent()[0]
+            
             if dados is None:
-                # Limpar memória do elemento processado (CRUCIAL pro iterparse)
-                elem.clear()
-                while elem.getprevious() is not None:
-                    del elem.getparent()[0]
                 continue
             
             total_relevantes += 1
             
-            # Upsert no banco: Processo
-            processo_existente = session.query(Processo).get(dados["numero_processo"])
-            if processo_existente:
-                # Atualizar campos
-                processo_existente.marca_nome = dados["marca_nome"]
-                processo_existente.codigo_ipas = dados["codigo_ipas"]
-                processo_existente.titular_nome = dados["titular_nome"]
-                processo_existente.titular_documento = dados["titular_documento"]
-                processo_existente.tem_procurador = dados["tem_procurador"]
-                processo_existente.procurador_nome = dados["procurador_nome"]
-                processo_existente.classe_nice = dados["classe_nice"]
-            else:
-                novo_processo = Processo(
-                    numero_processo=dados["numero_processo"],
-                    marca_nome=dados["marca_nome"],
-                    titular_nome=dados["titular_nome"],
-                    titular_documento=dados["titular_documento"],
-                    tem_procurador=dados["tem_procurador"],
-                    procurador_nome=dados["procurador_nome"],
-                    classe_nice=dados["classe_nice"],
-                    codigo_ipas=dados["codigo_ipas"],
-                    titular_uf=dados.get("titular_uf"),
-                    data_deposito=dados["data_deposito"],
-                    numero_rpi=numero_rpi,
-                )
-                session.add(novo_processo)
+            _upsert_processo(session, dados, numero_rpi)
             
-            # Criar Lead: se chegou aqui, procurador já foi filtrado na extração
-            # Basta verificar se tem titular para criar o lead
-            eh_lead = (dados["codigo_ipas"] in TARGET_CODES)
+            if _upsert_lead(session, dados, leads_cache):
+                total_leads += 1
             
-            if eh_lead:
-                titular = dados.get("titular_nome")
-                
-                if titular:
-                    lead_existente = leads_cache.get(titular)
-                    
-                    if not lead_existente:
-                        # Verifica no banco apenas se não estiver no cache
-                        lead_existente = session.query(Lead).join(Processo).filter(
-                            Processo.titular_nome == titular
-                        ).first()
-                        if lead_existente:
-                            leads_cache[titular] = lead_existente
-                    
-                    if lead_existente:
-                        # Agrupar: atualizar o lead que já existe para o mesmo Titular
-                        qtd = len(dados.get("codigos_ocorridos", []))
-                        lead_existente.quantidade_ataques = (lead_existente.quantidade_ataques or 0) + qtd
-                        
-                        novo_det = dados.get("detalhes_processos")
-                        if novo_det:
-                            if lead_existente.detalhes_processos:
-                                lead_existente.detalhes_processos += f" || {novo_det}"
-                            else:
-                                lead_existente.detalhes_processos = novo_det
-                                
-                        # Soma um pequeno bônus ao score por ter sofrido ataque múltiplo (e limita em 100)
-                        lead_existente.score = min((lead_existente.score or 0) + 10, 100)
-                        lead_existente.classificacao = classificar_lead(lead_existente.score)
-                    else:
-                        # Criar novo lead
-                        score = calcular_score_inicial(dados)
-                        classificacao = classificar_lead(score)
-                        
-                        novo_lead = Lead(
-                            numero_processo=dados["numero_processo"],
-                            score=score,
-                            classificacao=classificacao,
-                            tipo_pessoa=dados.get("tipo_pessoa"),
-                            quantidade_ataques=len(dados.get("codigos_ocorridos", [])),
-                            detalhes_processos=dados.get("detalhes_processos"),
-                            status="PENDENTE",
-                        )
-                        session.add(novo_lead)
-                        leads_cache[titular] = novo_lead
-                        total_leads += 1
-            
-            # Commit a cada 500 registros (performance)
             if total_relevantes % 500 == 0:
                 session.commit()
-            
-            # CRUCIAL: limpar memória do elemento XML já processado
-            elem.clear()
-            while elem.getprevious() is not None:
-                del elem.getparent()[0]
         
-        # Commit final
         session.commit()
         
-        # Atualizar rpi_history se temos o número
         if numero_rpi:
             rpi = session.query(RPIHistory).get(numero_rpi)
             if rpi:
@@ -435,13 +400,13 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
         
         print(f"\n{'='*60}")
         print(f"✅ Parsing concluído!")
-        print(f"   📊 Total no XML:    {total_processos_xml:,}")
+        print(f"   📊 Total no XML:    {total_processos:,}")
         print(f"   🎯 Relevantes:      {total_relevantes:,}")
         print(f"   🔥 Leads criados:   {total_leads:,}")
         print(f"\n   Próximo passo: python enriquecimento.py")
         
         return {
-            "total_xml": total_processos_xml,
+            "total_xml": total_processos,
             "relevantes": total_relevantes,
             "leads": total_leads,
         }
@@ -462,27 +427,22 @@ def parsear_xml(caminho_xml: Path, numero_rpi: int | None = None):
 
 
 # ============================================================
-# MAIN
+# RESOLUÇÃO DE CAMINHO XML
 # ============================================================
 
-def main():
-    parser = argparse.ArgumentParser(description="Parser streaming do XML da RPI")
-    parser.add_argument("--arquivo", type=str, help="Caminho direto para o XML")
-    parser.add_argument("--rpi", type=int, help="Número da RPI (ex: 202610)")
-    args = parser.parse_args()
-    
-    criar_tabelas()
-    
+def _resolver_caminho_xml(args) -> tuple[Path, int | None]:
+    """
+    Resolve o caminho do XML e o número da RPI a partir dos argumentos.
+    Retorna (caminho, numero_rpi).
+    """
     if args.arquivo:
-        # Modo direto: arquivo específico
         caminho = Path(args.arquivo)
         if not caminho.exists():
             print(f"❌ Arquivo não encontrado: {caminho}")
             sys.exit(1)
-        parsear_xml(caminho, numero_rpi=args.rpi)
+        return caminho, args.rpi
     
-    elif args.rpi:
-        # Buscar no banco o caminho do XML dessa RPI
+    if args.rpi:
         session = get_session()
         rpi = session.query(RPIHistory).get(args.rpi)
         session.close()
@@ -495,28 +455,42 @@ def main():
         if not caminho.exists():
             print(f"❌ Arquivo {caminho} não existe no disco.")
             sys.exit(1)
-        
-        parsear_xml(caminho, numero_rpi=args.rpi)
+        return caminho, args.rpi
     
-    else:
-        # Modo automático: pegar a última RPI com status COMPLETED
-        session = get_session()
-        ultima_rpi = session.query(RPIHistory).filter_by(
-            status="COMPLETED"
-        ).order_by(RPIHistory.numero_rpi.desc()).first()
-        session.close()
-        
-        if not ultima_rpi or not ultima_rpi.arquivo_path:
-            print("❌ Nenhuma RPI encontrada. Execute primeiro: python download_rpi.py")
-            sys.exit(1)
-        
-        caminho = Path(ultima_rpi.arquivo_path)
-        if not caminho.exists():
-            print(f"❌ Arquivo {caminho} não existe. Re-execute o download.")
-            sys.exit(1)
-        
-        print(f"📰 Usando última RPI: {ultima_rpi.numero_rpi}")
-        parsear_xml(caminho, numero_rpi=ultima_rpi.numero_rpi)
+    # Modo automático: última RPI com status COMPLETED
+    session = get_session()
+    ultima_rpi = session.query(RPIHistory).filter_by(
+        status="COMPLETED"
+    ).order_by(RPIHistory.numero_rpi.desc()).first()
+    session.close()
+    
+    if not ultima_rpi or not ultima_rpi.arquivo_path:
+        print("❌ Nenhuma RPI encontrada. Execute primeiro: python download_rpi.py")
+        sys.exit(1)
+    
+    caminho = Path(ultima_rpi.arquivo_path)
+    if not caminho.exists():
+        print(f"❌ Arquivo {caminho} não existe. Re-execute o download.")
+        sys.exit(1)
+    
+    print(f"📰 Usando última RPI: {ultima_rpi.numero_rpi}")
+    return caminho, ultima_rpi.numero_rpi
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Parser streaming do XML da RPI")
+    parser.add_argument("--arquivo", type=str, help="Caminho direto para o XML")
+    parser.add_argument("--rpi", type=int, help="Número da RPI (ex: 202610)")
+    args = parser.parse_args()
+    
+    criar_tabelas()
+    
+    caminho, numero_rpi = _resolver_caminho_xml(args)
+    parsear_xml(caminho, numero_rpi=numero_rpi)
 
 
 if __name__ == "__main__":

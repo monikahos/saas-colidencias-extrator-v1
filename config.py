@@ -38,10 +38,12 @@ DATABASE_URL = os.getenv("DATABASE_URL", f"sqlite:///{DATA_DIR / 'leads.db'}")
 # CONFIGURAÇÃO
 # ============================================================
 
-# Somente esses 3 códigos IPAS geram leads (igual ao extrator_consolidado.py)
-TARGET_CODES = {'IPAS024', 'IPAS423', 'IPAS400'}
+# Foco na "Oposição para se manifestar" (Primeira rodada de teste)
+TARGET_CODES = {'IPAS423'} # Código IPAS423 = Oposição
+# TARGET_CODES = {'IPAS024', 'IPAS423', 'IPAS400'} # Códigos originais
 
 IPAS_RENOVACAO_CODES = set()  # Sem renovação por ora
+LEADS_ENRICH_LIMIT = int(os.getenv("LEADS_ENRICH_LIMIT", "50"))
 
 
 # ============================================================
@@ -64,8 +66,15 @@ COOLDOWN_HORAS = 12
 # CREDENCIAIS (carregadas do .env, NUNCA hardcoded)
 # ============================================================
 CAPMONSTER_API_KEY = os.getenv("CAPMONSTER_API_KEY", "")
-PROXY_URL = os.getenv("PROXY_URL", "")
+# Proxy (Suporta lista separada por vírgula para rotação)
+_PROXY_RAW = os.getenv("PROXY_URL", "")
+PROXY_LIST = [p.strip() for p in _PROXY_RAW.split(",") if p.strip()]
+
 INFOSIMPLES_TOKEN = os.getenv("INFOSIMPLES_TOKEN", "")
+
+# Notificação por email (Resend)
+RESEND_API_KEY = os.getenv("RESEND_API_KEY", "")
+NOTIFY_EMAIL = os.getenv("NOTIFY_EMAIL", "")
 
 def carregar_contas_inpi() -> list[dict]:
     """

@@ -162,27 +162,27 @@ def executar_pipeline(numero_rpi: int):
     print(f"{'='*60}\n")
     
     try:
-        # 1. Download
+        resultado = {}
+        
+        # 1. Download + Parse (só na primeira vez)
         print("📥 [1/4] Baixando XML do INPI...")
         caminho_xml = download_rpi(numero_rpi)
         
         if caminho_xml is None:
-            print("⏭️  RPI já processada anteriormente. Nada a fazer.")
-            return
+            print("⏭️  RPI já baixada anteriormente. Pulando download e parse, indo direto ao enriquecimento.")
+        else:
+            # 2. Parse
+            print("\n🔍 [2/4] Parseando XML e gerando leads...")
+            resultado = parsear_xml(caminho_xml, numero_rpi=numero_rpi)
         
-        # 2. Parse
-        print("\n🔍 [2/4] Parseando XML e gerando leads...")
-        resultado = parsear_xml(caminho_xml, numero_rpi=numero_rpi)
-        
-        # 3. Enriquecer (Extrair e-mails dos PDFs no pePI)
+        # 3. Enriquecer — SEMPRE roda, independente do download
         print(f"\n🤖 [3/4] Iniciando Enriquecimento (Limite: {LEADS_ENRICH_LIMIT} melhores leads)...")
-        # Processa apenas os melhores leads (com base no score inicial do XML)
         processar_leads_pendentes(limite=LEADS_ENRICH_LIMIT)
         
-        # 4. Notificar
+        # 4. Notificar — SEMPRE envia, para confirmar que a batida rodou
         print("\n📧 [4/4] Enviando notificação...")
         enviar_email(
-            assunto=f"✅ RPI {numero_rpi} — {resultado.get('leads', 0)} leads capturados",
+            assunto=f"✅ Batida concluída — RPI {numero_rpi} | {resultado.get('leads', '—')} leads capturados",
             corpo_html=_email_sucesso(numero_rpi, resultado),
         )
         

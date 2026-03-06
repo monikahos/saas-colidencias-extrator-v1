@@ -154,11 +154,13 @@ def aplicar_atraso_furtivo(max_minutos: int = 45):
 # PIPELINE PRINCIPAL
 # ============================================================
 
-def executar_pipeline(numero_rpi: int):
+def executar_pipeline(numero_rpi: int, so_baixar: bool = False):
     """Executa o pipeline completo: download → parse → enriquecer → email."""
     print(f"\n{'='*60}")
     print(f"🚀 Pipeline automático — RPI {numero_rpi}")
     print(f"📅 Data: {date.today()}")
+    if so_baixar:
+        print("📥 MODO: APENAS DOWNLOAD E PARSE ATIVO.")
     print(f"{'='*60}\n")
     
     try:
@@ -169,20 +171,24 @@ def executar_pipeline(numero_rpi: int):
         caminho_xml = download_rpi(numero_rpi)
         
         if caminho_xml is None:
-            print("⏭️  RPI já baixada anteriormente. Pulando download e parse, indo direto ao enriquecimento.")
+            print("⏭️  RPI já baixada anteriormente. Pulando download.")
         else:
             # 2. Parse
             print("\n🔍 [2/4] Parseando XML e gerando leads...")
             resultado = parsear_xml(caminho_xml, numero_rpi=numero_rpi)
         
-        # 3. Enriquecer — SEMPRE roda, independente do download
-        print(f"\n🤖 [3/4] Iniciando Enriquecimento (Limite: {LEADS_ENRICH_LIMIT} melhores leads)...")
-        processar_leads_pendentes(limite=LEADS_ENRICH_LIMIT)
+        # 3. Enriquecer — Só roda se NÃO for modo so_baixar
+        if so_baixar:
+            print("\n⏭️ [3/4] Enriquecimento pulado (Modo apenas download).")
+        else:
+            print(f"\n🤖 [3/4] Iniciando Enriquecimento (Limite: {LEADS_ENRICH_LIMIT} melhores leads)...")
+            processar_leads_pendentes(limite=LEADS_ENRICH_LIMIT)
         
-        # 4. Notificar — SEMPRE envia, para confirmar que a batida rodou
+        # 4. Notificar
         print("\n📧 [4/4] Enviando notificação...")
+        assunto = f"✅ RPI {numero_rpi} Pronta" if so_baixar else f"✅ Batida concluída — RPI {numero_rpi}"
         enviar_email(
-            assunto=f"✅ Batida concluída — RPI {numero_rpi} | {resultado.get('leads', '—')} leads capturados",
+            assunto=f"{assunto} | {resultado.get('leads', '—')} leads",
             corpo_html=_email_sucesso(numero_rpi, resultado),
         )
         
@@ -207,6 +213,7 @@ def executar_pipeline(numero_rpi: int):
 def main():
     parser = argparse.ArgumentParser(description="Pipeline automático de leads INPI")
     parser.add_argument("--rpi", type=int, help="Número da RPI (auto-calcula se omitido)")
+    parser.add_argument("--so-baixar", action="store_true", help="Apenas baixa e parseia, sem enriquecer")
     args = parser.parse_args()
     
     criar_tabelas()
@@ -214,12 +221,13 @@ def main():
     numero_rpi = args.rpi or calcular_rpi_da_semana()
     
     # Aplica o atraso se estiver rodando no automático (sem RPI forçada)
+    # No modo apenas download (terça), podemos usar um delay menor
     if not args.rpi:
-        aplicar_atraso_furtivo(max_minutos=50) # Varia em até 50 minutos
+        aplicar_atraso_furtivo(max_minutos=40 if not args.so_baixar else 15)
         
     print(f"📰 RPI alvo: {numero_rpi}")
     
-    executar_pipeline(numero_rpi)
+    executar_pipeline(numero_rpi, so_baixar=args.so_baixar)
 
 
 if __name__ == "__main__":
